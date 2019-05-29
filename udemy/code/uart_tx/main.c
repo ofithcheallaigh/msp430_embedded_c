@@ -44,18 +44,27 @@
 
 #include <msp430.h> 
 
-#define STOP_WATCHDOG           0x5A80
 #define ENABLE_PINS             0xFFFE
+#define UART_CLK_SEL            0x0080                  // Specifies accurate SMCLK clock for UART
+#define BR0_FOR_9600            0x34                    // Value required to use 9600 baud
+#define BR1_FOR_9600            0x00                    // Value required to use 9600 baud
+#define CLK_MOD                 0x4911                  // uC will "clean-up" clock signal
+
+
+// Function prototypes
+void select_clock_signals(void);
+void assign_pins_to_uart(void);
+void use_9600_baud(void);
 
 /*
  * Below is the main() function we will use for out first UART program to transmit a byte of data
  *
- * The program begins by disabling the WDT and enabling the microcontroller pins
+ * The program begins by disabling the WDT and enabling the uC pins
  */
 
 main()
 {
-    WDTCTL = STOP_WATCHDOG;
+    WDTCTL = WDTPW | WDTHOLD;
     PM5CTL0 = ENABLE_PINS;
 
     /*
@@ -109,6 +118,75 @@ void select_clock_signals(void)
     CSCTL2 = 0x0133;                    // Assigns additional clock signals
     CSCTL3 = 0x0000;                    // Use clocks at intended freq, do not slow them down
 }
+
+// **********************************************
+// Used to give UART control of appropriate pins
+// **********************************************
+/*
+ * This function removes control of the P4.2 and P4.3 pins from the traditional digital inputs
+ * and outputs we have been using and gives them to the UART peripheral to control.
+ * The UART peripheral we are using must use pins P4.2 and P4.3, we cannot randomly choose
+ * any pins we want.
+ *
+ * This assignment is done with Port 4 SELect 1 register and Port 4 SELect 0 register
+ */
+void assign_pins_to_uart(void)
+{
+    P4SEL1 = 0x00;              // 0000 0000
+    P4SEL0 = BIT3 | BIT2;       // 0000 1100
+                                //      ^^
+                                //      ||
+                                //      |+----- 01 assigns P4.2 to UART Transmit (TXD)
+                                //      |
+                                //      +------ 01 assigns P4.3 to UART Receive (RXD)
+}
+
+
+// ********************************
+// Specify UART baud rate
+// ********************************
+/*
+ * The final function we use in out program is use_9600_baud. These instructions are used to specify
+ * how fast we will be transmitting data out of the P4.2 transmit pin. We have selected 9600 baud,
+ * or 9600 bits per second. While this may not seem very fast by todays standards, 9600 baud is one
+ * of the most common frequencies for low-level uC to share information with each other. In most
+ * applications, these uC are not sending and receiving large files or images. Instead they typically send
+ * short messages or codes to each other to notify the system how things are performing, or if they are
+ * requesting any additional data or status updates.
+ *
+ * The first instruction puts a SoftWare hold (or ReSeT) on the UART peripheral while we specify its
+ * expected baud rate.
+ *
+ * The next instruction maps a specific clock course to the peripheral. As mentioned above, this
+ * instruction actually chooses the SMCLK as the time-base for the UART.
+ *
+ * Next, we have two instructions that actually set the baud rate to 9600. These are large look-up
+ * tables for the values to assign to these two registers based upon the desired baud rate and the selected
+ * clock peripheral.
+ *
+ * Then we tell the peripheral to clean-up the clock signal a bit so its easier for other UARTs to understand.
+ *
+ * Finally, we release the SoftWare hold (or ReSeT) on the UART peripheral so it can be used
+ *
+ */
+void use_9600_baud(void)
+{
+    UCA0CTLW0 = UCSWRST;                            // Puts UART into SoftWare ReSeT
+    UCA0CTLW0 = UCA0CTLW0 | UART_CLK_SEL;           // Specifies clock source for UART
+    UCA0BR0 = BR0_FOR_9600;                         // Specifies bit rate of 9600
+    UCA0BR1 = BR1_FOR_9600;                         // Specifies bit rate of 9600
+    UCA0MCTLW = CLK_MOD;                            // "Cleans" clock signal
+    UCA0CTLW0 = UCA0CTLW0 & (~UCSWRST);             // Takes UART out of SoftWare ReSeT
+}
+
+
+
+
+
+
+
+
+
 
 
 /*
@@ -176,6 +254,56 @@ void select_clock_signals(void)
  * How do we figure this out? Doing so is not easy without some help. To correctly decode all of this, you would actually need
  * to read the Clock System Module chapter and the UART chapter of the Family User's Guide. To help out sometimes, you can get sample code
  * from a uC manufacturer to get you started. TI makes this available online. too, but again, most of the sample code was written
- * by experts, for experts. But the relavent function here gives an idea of what is going on.
+ * by experts, for experts. But the relevant function here gives an idea of what is going on.
+ *
+ * Now lets look at the register assignment within the select_clock_signals function
+ *      CSCTL2 = 0x0133;                // Assigns additional clock signals
+ * Below is the register
+ * CSCTL2
+ * |=======================================================================|
+ * |   15   |   14   |   13   |   12   |   11   |   10   |    9   |    8   |
+ * |                 Reserved                   |           SELA           |
+ * |    0   |    0   |    0   |    0   |    0   |    0   |    0   |    0   |
+ * |=======================================================================|
+ * |    7   |    6   |    5   |    4   |    3   |    2   |    1   |    0   |
+ * |Reserved|            SELS          |Reserved|           SELM           |
+ * |    0   |    1   |    0   |    0   |    0   |    1   |    1   |    0   |
+ * |=======================================================================|
+ *
+ * CSCTL1 Register Description:
+ * Bit      Field       Type    Reset   Description
+ * -------------------------------------------------------------------------------------------
+ * 15-11    Reserved    R       0h      Reserved. Always reads 0.
+ * 10-8     SELA        RW      0h      Selects the ACLK source
+ *                                      000b = LFXTCLK when LFXT available, otherwise VLOCLK
+ *                                      001b = VLOCLK
+ *                                      010b = LFMODCLK
+ *                                      011b = Reserved. Defaults to LFMODCLK. Not recommended to use to ensure future compatibility
+ *                                      100b = Reserved. Defaults to LFMODCLK. Not recommended to use to ensure future compatibility
+ *                                      101b = Reserved. Defaults to LFMODCLK. Not recommended to use to ensure future compatibility
+ *                                      110b = Reserved. Defaults to LFMODCLK. Not recommended to use to ensure future compatibility
+ *                                      111b = Reserved. Defaults to LFMODCLK. Not recommended to use to ensure future compatibility
+ * 7        Reserved    R       0h      Reserved. Always reads 0.
+ * 6-4      SELS        RW      3h      Selects the SMCLK source
+ *                                      000b = LFXTCLK when LFXT available, otherwise VLOCLK
+ *                                      001b = VLOCLK
+ *                                      010b = LFMODCLK
+ *                                      011b = DCOCLK
+ *                                      100b = MODCLK
+ *                                      101b = HFXTCLK when HFXT available, otherwise DCOCLK
+ *                                      110b = Reserved. Defaults to HFXTCLK. Not recommended to use to ensure future compatibility
+ *                                      111b = Reserved. Defaults to HFXTCLK. Not recommended to use to ensure future compatibility
+ * 3        Reserved    R       0h      Reserved. Always reads 0.
+ * 2-0      SELM        RW      3h      Selects the MCLK source
+ *                                      000b = LFXTCLK when LFXT available, otherwise VLOCLK
+ *                                      001b = VLOCLK
+ *                                      010b = LFMODCLK
+ *                                      011b = DCOCLK
+ *                                      100b = MODCLK
+ *                                      101b = HFXTCLK when HFXT available, otherwise DCOCLK
+ *                                      110b = Reserved. Defaults to HFXTCLK. Not recommended to use to ensure future compatibility
+ *                                      111b = Reserved. Defaults to HFXTCLK. Not recommended to use to ensure future compatibility
+ *
+ *
  *
  */
